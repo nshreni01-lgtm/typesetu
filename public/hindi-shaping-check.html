@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TypeSetu — Hindi shaping &amp; reorder check</title>
+<style>
+  :root { color-scheme: light }
+  body {
+    margin: 0; padding: 32px;
+    background: #fafafa; color: #171717;
+    font: 15px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px }
+  h2 { font-size: 16px; margin: 32px 0 8px }
+  p.lede { color: #525252; margin: 0 0 24px }
+  .dev { font-family: "Noto Sans Devanagari", "Nirmala UI", Mangal, sans-serif; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px }
+  th { text-align: left; color: #737373; font-weight: 500; padding: 6px 10px 6px 0 }
+  td { padding: 8px 10px 8px 0; border-top: 1px solid #e5e5e5; vertical-align: middle }
+  .cp { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #737373 }
+  .pass { color: #047857; font-weight: 600 }
+  .fail { color: #b91c1c; font-weight: 600 }
+  .big { font-size: 34px; line-height: 1.4 }
+  .panel { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 20px; margin-top: 12px }
+  .banner { border-radius: 8px; padding: 12px 14px; margin: 0 0 8px; font-size: 14px }
+  .ok { background: #ecfdf5; color: #065f46 }
+  .bad { background: #fef2f2; color: #7f1d1d }
+  .split span { background: #ecfdf5; outline: 1px solid #a7f3d0 }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #737373; margin-bottom: 6px }
+  code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 13px }
+</style>
+</head>
+<body>
+<h1>Hindi shaping &amp; reorder check</h1>
+<p class="lede">Answers the two questions the master blueprint left open: does <span class="dev">कि</span> need reordering on input, and does per-character span rendering break it. Runs standalone — no dev server needed.</p>
+<div id="app"></div>
+<script>
+const VIRAMA = '्', I_MATRA = 'ि';
+
+// ---- mirror of lib/typing/graphemes.ts -------------------------------------
+function toGraphemes(text) {
+  if (!text) return [];
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    const seg = new Intl.Segmenter('hi', { granularity: 'grapheme' });
+    return [...seg.segment(text)].map(s => s.segment);
+  }
+  return [...text];
+}
+
+// ---- mirror of lib/keymaps/remington-gail.ts -------------------------------
+function classify(out) {
+  if (out === I_MATRA) return 'prebase-matra';
+  if (out === VIRAMA) return 'virama';
+  const cp = out.codePointAt(0);
+  if (cp >= 0x0915 && cp <= 0x0939) return 'consonant';
+  if (cp >= 0x0958 && cp <= 0x095f) return 'consonant';
+  if (cp >= 0x0905 && cp <= 0x0914) return 'vowel';
+  if (cp >= 0x093e && cp <= 0x094c) return 'matra';
+  if (cp >= 0x0900 && cp <= 0x0903) return 'sign';
+  return 'other';
+}
+
+function transliterate(pieces) {
+  let out = '', pending = null, provisional = 0;
+  for (const piece of pieces) {
+    const kind = classify(piece);
+    if (kind === 'prebase-matra') { pending = piece; provisional = 0; continue; }
+    if (kind === 'virama') {
+      if (provisional > 0) {
+        pending = out.slice(out.length - provisional);
+        out = out.slice(0, out.length - provisional);
+        provisional = 0;
+      }
+      out += piece; continue;
+    }
+    if (kind === 'consonant') {
+      out += piece;
+      if (pending) { out += pending; provisional = pending.length; pending = null; }
+      else provisional = 0;
+      continue;
+    }
+    if (pending) { out += pending; pending = null; }
+    out += piece; provisional = 0;
+  }
+  if (pending) out += pending;
+  return out;
+}
+
+// ---- checks ---------------------------------------------------------------
+const CHECKS = [
+  ['pre-base matra reorders: [ि][क]', [I_MATRA,'क'], 'कि'],
+  ['conjunct keeps matra last: [ि][क][्][ष]', [I_MATRA,'क',VIRAMA,'ष'], 'क्षि'],
+  ['post-base matra untouched: [क][ा]', ['क','ा'], 'का'],
+  ['anusvara after matra: [ि][क][ं]', [I_MATRA,'क','ं'], 'किं'],
+  ['two words: [ि][क][ ][क][ा]', [I_MATRA,'क',' ','क','ा'], 'कि का'],
+  ['orphan matra kept: [ि][ ]', [I_MATRA,' '], I_MATRA + ' '],
+  ['naive 1:1 mapping would give', null, 'िक'],
+];
+
+function cp(s) {
+  return [...s].map(c => 'U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')).join(' ');
+}
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+let rows = '', allPass = true;
+for (const [name, pieces, expected] of CHECKS) {
+  if (!pieces) {
+    rows += `<tr><td>${esc(name)}</td><td class="dev big">${expected}</td>`
+         +  `<td class="cp">${cp(expected)}</td><td>—</td>`
+         +  `<td class="fail">what we must avoid</td></tr>`;
+    continue;
+  }
+  const actual = transliterate(pieces);
+  const pass = actual === expected;
+  if (!pass) allPass = false;
+  rows += `<tr><td>${esc(name)}</td><td class="dev big">${actual}</td>`
+       +  `<td class="cp">${cp(actual)}</td>`
+       +  `<td>${toGraphemes(actual).length}</td>`
+       +  `<td class="${pass?'pass':'fail'}">${pass ? 'PASS' : 'FAIL — wanted ' + expected}</td></tr>`;
+}
+
+const SAMPLE = 'कि की क्षि किं नहीं द्ध त्र शिक्षा';
+const clusters = toGraphemes(SAMPLE);
+const perCluster = clusters.map(g => `<span>${g}</span>`).join('');
+const perCodeUnit = [...SAMPLE].map(c => `<span>${c}</span>`).join('');
+
+document.getElementById('app').innerHTML = `
+  <div class="banner ${allPass ? 'ok' : 'bad'}">
+    Reorder engine: <strong>${allPass ? 'all checks pass' : 'CHECKS FAILING'}</strong>
+    &nbsp;·&nbsp; Intl.Segmenter: <strong>${(typeof Intl!=='undefined' && Intl.Segmenter) ? 'available' : 'MISSING — using fallback'}</strong>
+  </div>
+
+  <h2>1 &nbsp;Input reordering</h2>
+  <p class="lede">A Remington typist presses the <span class="dev">ि</span> key <em>before</em> the consonant,
+  because that is where the glyph sits on the paper. Stored Unicode must still be
+  consonant-then-matra. So a reorder step is required on input.</p>
+  <div class="panel">
+    <table>
+      <thead><tr><th>Check</th><th>Output</th><th>Code points</th><th>Clusters</th><th>Result</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+
+  <h2>2 &nbsp;Rendering: cluster spans vs per-code-unit spans</h2>
+  <p class="lede">Both boxes hold the same string. The only difference is where the
+  <code>&lt;span&gt;</code> boundaries fall. Highlighting a typing passage means one
+  span per unit, so this choice decides whether Hindi renders at all.</p>
+  <div class="grid2">
+    <div class="panel">
+      <div class="label">One span per grapheme cluster &mdash; correct</div>
+      <div class="dev big split">${perCluster}</div>
+      <div class="cp" style="margin-top:10px">${clusters.length} spans</div>
+    </div>
+    <div class="panel">
+      <div class="label">One span per code unit &mdash; the old <code>split('')</code></div>
+      <div class="dev big split">${perCodeUnit}</div>
+      <div class="cp" style="margin-top:10px">${[...SAMPLE].length} spans</div>
+    </div>
+  </div>
+  <p class="lede" style="margin-top:12px">If the right-hand box shows dotted circles
+  (&#x25CC;), detached matras, or broken conjuncts while the left one reads cleanly,
+  that is the bug — and it is a <em>rendering</em> bug, not a Unicode-order bug.</p>
+
+  <h2>3 &nbsp;Live keystroke probe</h2>
+  <p class="lede">Type here with a Remington GAIL IME active, then with it off. The log
+  shows exactly what each keystroke produces, so the real input order is observable
+  rather than guessed.</p>
+  <div class="panel">
+    <input id="probe" class="dev" style="font-size:26px;width:100%;padding:10px;border:1px solid #d4d4d4;border-radius:6px" placeholder="कि टाइप करें…">
+    <div id="log" class="cp" style="margin-top:12px;white-space:pre-wrap"></div>
+  </div>
+`;
+
+const probe = document.getElementById('probe'), log = document.getElementById('log');
+const lines = [];
+probe.addEventListener('keydown', e => {
+  lines.push(`keydown  key=${JSON.stringify(e.key)} code=${e.code} composing=${e.isComposing}`);
+  render();
+});
+probe.addEventListener('input', () => {
+  lines.push(`input    value=${JSON.stringify(probe.value)}  ${cp(probe.value)}  clusters=${toGraphemes(probe.value).length}`);
+  render();
+});
+function render() { log.textContent = lines.slice(-14).join('\n'); }
+</script>
+</body>
+</html>
